@@ -9,7 +9,6 @@ const path = require('path');
 const app = express();
 const port = process.env.PORT || 3000;
 
-
 // Enable CORS for all routes
 app.use(cors());
 
@@ -24,6 +23,9 @@ const upload = multer({ dest: 'uploads/' });
 // Store clients by session id
 const clients = {};
 
+// Store received messages by session id
+const receivedMessages = {};
+
 // Create a new WhatsApp session
 app.post('/create-session', async (req, res) => {
     const { sessionId } = req.body;
@@ -34,7 +36,9 @@ app.post('/create-session', async (req, res) => {
         authStrategy: new LocalAuth({ clientId: sessionId })
     });
 
+
     clients[sessionId] = { client, qr: null, ready: false };
+    receivedMessages[sessionId] = [];
 
     client.on('qr', qr => {
         clients[sessionId].qr = qr;
@@ -44,8 +48,25 @@ app.post('/create-session', async (req, res) => {
         clients[sessionId].ready = true;
     });
 
+
+    client.on('message', msg => {
+        // Store message details (basic info)
+        receivedMessages[sessionId].push({
+            from: msg.from,
+            to: msg.to,
+            body: msg.body,
+            timestamp: msg.timestamp,
+            id: msg.id._serialized
+        });
+        // Limit to last 50 messages per session
+        if (receivedMessages[sessionId].length > 50) {
+            receivedMessages[sessionId].shift();
+        }
+    });
+
     client.on('disconnected', () => {
         delete clients[sessionId];
+        delete receivedMessages[sessionId];
     });
 
     client.initialize();
@@ -95,13 +116,37 @@ app.post('/send-media', upload.single('media'), async (req, res) => {
     }
 });
 
-// Receive messages (webhook style, for demo: poll latest message)
-app.get('/receive-messages/:sessionId', async (req, res) => {
+// Receive messages (returns last 50 messages for the session)
+app.get('/receive-messages/:sessionId', (req, res) => {
     const { sessionId } = req.params;
     const session = clients[sessionId];
     if (!session || !session.ready) return res.status(400).json({ error: 'Session not ready' });
-    // This is a placeholder. For production, use event-based webhooks or persistent storage.
-    res.json({ status: 'Receiving messages requires webhook/event setup.' });
+    const messages = receivedMessages[sessionId] || [];
+    res.json({ messages });
+});
+
+// Check session status
+app.get('/session-status/:sessionId', (req, res) => {
+    const { sessionId } = req.params;
+    const session = clients[sessionId];
+    if (!session) {
+        return res.status(404).json({ status: 'not_found', ready: false, message: 'Session not found' });
+    }
+    res.json({
+        status: session.ready ? 'ready' : (session.qr ? 'qr' : 'initializing'),
+        ready: session.ready,
+        qr: !!session.qr
+    });
+});
+
+// Get list of all sessions
+app.get('/sessions', (req, res) => {
+    const sessionList = Object.entries(clients).map(([sessionId, session]) => ({
+        sessionId,
+        ready: session.ready,
+        qr: !!session.qr
+    }));
+    res.json({ sessions: sessionList });
 });
 
 app.listen(port, () => {
